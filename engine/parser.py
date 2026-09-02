@@ -1,20 +1,40 @@
+from __future__ import annotations
+
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+
+from engine.models import DiscoveredLink, PageData
+from engine.policies import is_probably_html_url
+from engine.utils import collapse_whitespace, normalize_url
+
+
+class HTMLPageParser:
+    def parse(self, html: str, url: str, depth: int, incoming_anchor_text: str = "") -> PageData:
+        soup = BeautifulSoup(html, "html.parser")
+
+        for tag in soup(["script", "style", "noscript", "template", "svg"]):
+            tag.decompose()
+
+        title = collapse_whitespace(soup.title.get_text(" ", strip=True)) if soup.title else ""
+        text = collapse_whitespace(soup.get_text(" ", strip=True))
+
+        links: list[DiscoveredLink] = []
+        seen: set[str] = set()
+        for tag in soup.find_all("a", href=True):
+            normalized = normalize_url(str(tag["href"]), base_url=url)
+            if normalized is None or normalized in seen or not is_probably_html_url(normalized):
+                continue
+            seen.add(normalized)
+            links.append(
+                DiscoveredLink(
+                    url=normalized,
+                    anchor_text=collapse_whitespace(tag.get_text(" ", strip=True)),
+                    source_url=url,
+                    depth=depth + 1,
+                )
+            )
+
+        return PageData(url=url, title=title, text=text, links=links, depth=depth, incoming_anchor_text=incoming_anchor_text)
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
-    soup = BeautifulSoup(html, "html.parser")
-
-    links = []
-
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"]
-
-        # Convert relative URLs to absolute URLs
-        full_url = urljoin(base_url, href)
-
-        # Only HTTP/HTTPS links
-        if full_url.startswith(("http://", "https://")):
-            links.append(full_url)
-
-    return links
+    return [link.url for link in HTMLPageParser().parse(html, base_url, depth=0).links]
