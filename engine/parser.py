@@ -15,6 +15,9 @@ class HTMLPageParser:
             tag.decompose()
 
         title = collapse_whitespace(soup.title.get_text(" ", strip=True)) if soup.title else ""
+        description_tag = soup.find("meta", attrs={"name": lambda value: value and value.lower() == "description"})
+        description = collapse_whitespace(str(description_tag.get("content", ""))) if description_tag else ""
+        headings = [collapse_whitespace(tag.get_text(" ", strip=True)) for tag in soup.find_all(["h1", "h2", "h3"])]
         text = collapse_whitespace(soup.get_text(" ", strip=True))
 
         links: list[DiscoveredLink] = []
@@ -33,7 +36,16 @@ class HTMLPageParser:
                 )
             )
 
-        return PageData(url=url, title=title, text=text, links=links, depth=depth, incoming_anchor_text=incoming_anchor_text)
+        return PageData(
+            url=url,
+            title=title,
+            text=text,
+            links=links,
+            depth=depth,
+            incoming_anchor_text=incoming_anchor_text,
+            headings=[heading for heading in headings if heading],
+            description=description,
+        )
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
