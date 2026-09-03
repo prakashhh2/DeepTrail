@@ -36,6 +36,8 @@ class PageData:
     links: list[DiscoveredLink]
     depth: int
     incoming_anchor_text: str = ""
+    headings: list[str] = field(default_factory=list)
+    description: str = ""
 
 
 @dataclass(slots=True)
