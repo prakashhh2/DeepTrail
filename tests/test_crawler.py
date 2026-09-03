@@ -17,6 +17,27 @@ class FakeFetcher:
         return FetchResult(url=url, status_code=200, content_type="text/html", text=html)
 
 
+class CustomScorer:
+    def __init__(self) -> None:
+        self.prepared_objective = None
+        self.page_calls = 0
+        self.link_calls = 0
+
+    def prepare(self, objective: str) -> None:
+        self.prepared_objective = objective
+
+    def score_page(self, objective, page) -> float:
+        self.page_calls += 1
+        return 0.4
+
+    def score_link(self, objective, link) -> float:
+        self.link_calls += 1
+        return 0.9
+
+    def explain(self, objective, page, score) -> str:
+        return "custom scorer"
+
+
 class CrawlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_crawler_stops_after_max_pages(self):
         pages = {
@@ -75,6 +96,33 @@ class CrawlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.stats.pages_crawled, 2)
         self.assertNotIn("https://other.edu/scholarships", fetcher.fetched)
+
+    async def test_custom_scorer_is_used_through_dependency_injection(self):
+        fetcher = FakeFetcher({
+            "https://example.edu/": '<title>Home</title><a href="/next">Next</a>',
+            "https://example.edu/next": "<title>Next</title><p>Content</p>",
+        })
+        scorer = CustomScorer()
+
+        response = await crawl(
+            CrawlRequest(
+                objective="custom objective",
+                seeds=["https://example.edu"],
+                max_pages=2,
+                max_depth=2,
+                respect_robots_txt=False,
+                crawl_delay_seconds=0,
+                concurrency=1,
+            ),
+            fetcher=fetcher,
+            scorer=scorer,
+        )
+
+        self.assertEqual(scorer.prepared_objective, "custom objective")
+        self.assertEqual(scorer.page_calls, 2)
+        self.assertEqual(scorer.link_calls, 1)
+        self.assertTrue(response.results)
+        self.assertEqual(response.results[0].reason, "custom scorer")
 
 
 if __name__ == "__main__":
