@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -11,7 +14,7 @@ from engine.frontier import CrawlFrontier, FrontierItem
 from engine.models import CrawlRequest, CrawlResponse, CrawlResult, CrawlStats, DiscoveredLink, FetchResult
 from engine.parser import HTMLPageParser
 from engine.policies import CrawlPolicy, DomainRateLimiter, RobotsTxtChecker
-from engine.scorer import KeywordRelevanceScorer, RelevanceScorer
+from engine.scorer import HybridRelevanceScorer, RelevanceScorer
 from engine.utils import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -48,7 +51,8 @@ async def crawl(
     policy = CrawlPolicy.from_request(request)
     frontier = CrawlFrontier()
     page_parser = parser or HTMLPageParser()
-    relevance_scorer = scorer or KeywordRelevanceScorer()
+    relevance_scorer = scorer or HybridRelevanceScorer()
+    scoring_executor = ThreadPoolExecutor(max_workers=max(1, request.concurrency))
     rate_limiter = DomainRateLimiter(request.crawl_delay_seconds)
     robots = robots_checker or RobotsTxtChecker(request.user_agent, timeout_seconds=min(5.0, request.request_timeout_seconds))
 
@@ -97,6 +101,7 @@ async def crawl(
                         policy=policy,
                         rate_limiter=rate_limiter,
                         robots_checker=robots,
+                        scoring_executor=scoring_executor,
                     )
                     for item in batch
                 )
@@ -130,16 +135,20 @@ async def crawl(
                     ):
                         stats.duplicates_skipped += 1
 
-    if owns_fetcher:
-        async with AsyncPageFetcher(
-            user_agent=request.user_agent,
-            timeout_seconds=request.request_timeout_seconds,
-            retry_limit=request.retry_limit,
-        ) as default_fetcher:
-            active_fetcher = default_fetcher
+    try:
+        await _prepare_scorer(relevance_scorer, request.objective, scoring_executor)
+        if owns_fetcher:
+            async with AsyncPageFetcher(
+                user_agent=request.user_agent,
+                timeout_seconds=request.request_timeout_seconds,
+                retry_limit=request.retry_limit,
+            ) as default_fetcher:
+                active_fetcher = default_fetcher
+                await run_loop()
+        else:
             await run_loop()
-    else:
-        await run_loop()
+    finally:
+        scoring_executor.shutdown(wait=True, cancel_futures=True)
 
     results.sort(key=lambda result: result.score, reverse=True)
     stats.crawl_duration_ms = int((time.monotonic() - started_at) * 1000)
@@ -156,6 +165,7 @@ async def _process_item(
     policy: CrawlPolicy,
     rate_limiter: DomainRateLimiter,
     robots_checker: RobotsTxtChecker,
+    scoring_executor: ThreadPoolExecutor,
 ) -> _ProcessedPage:
     if fetcher is None:
         raise RuntimeError("Crawler fetcher was not initialized")
@@ -185,17 +195,17 @@ async def _process_item(
             depth=item.depth,
             incoming_anchor_text=item.anchor_text,
         )
-        page_score = scorer.score_page(request.objective, page)
-
-        for link in page.links:
-            link.score = scorer.score_link(request.objective, link)
+        page_score = await _score_page(scorer, request.objective, page, scoring_executor)
+        link_scores = await _score_links(scorer, request.objective, page.links, scoring_executor)
+        for link, link_score in zip(page.links, link_scores):
+            link.score = link_score
 
         result = CrawlResult(
             url=page.url,
             title=page.title,
             score=page_score,
             depth=page.depth,
-            reason=scorer.explain(request.objective, page, page_score),
+            reason=await _explain(scorer, request.objective, page, page_score, scoring_executor),
         )
         return _ProcessedPage(result=result, links=page.links)
     except Exception as exc:
@@ -218,3 +228,54 @@ def _validate_request(request: CrawlRequest) -> None:
         raise ValueError("max_depth cannot be negative")
     if request.concurrency < 1:
         raise ValueError("concurrency must be at least 1")
+
+
+async def _run_in_executor(executor: ThreadPoolExecutor, function, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, functools.partial(function, *args))
+
+
+async def _prepare_scorer(scorer: RelevanceScorer, objective: str, executor: ThreadPoolExecutor) -> None:
+    prepare = getattr(scorer, "prepare", None)
+    if prepare is None:
+        return
+    prepared = await _run_in_executor(executor, prepare, objective)
+    if inspect.isawaitable(prepared):
+        await prepared
+
+
+async def _score_page(scorer: RelevanceScorer, objective: str, page, executor: ThreadPoolExecutor) -> float:
+    return await _run_in_executor(executor, scorer.score_page, objective, page)
+
+
+async def _score_links(
+    scorer: RelevanceScorer,
+    objective: str,
+    links: list[DiscoveredLink],
+    executor: ThreadPoolExecutor,
+) -> list[float]:
+    if not links:
+        return []
+
+    score_links = getattr(scorer, "score_links", None)
+    if score_links is not None:
+        scores = await _run_in_executor(executor, score_links, objective, links)
+        return list(scores)
+
+    # Keep compatibility with the original single-link scorer contract.  Each
+    # call runs off the event loop; scorers that support batching use the hook
+    # above and avoid this sequential fallback.
+    scores: list[float] = []
+    for link in links:
+        scores.append(await _run_in_executor(executor, scorer.score_link, objective, link))
+    return scores
+
+
+async def _explain(
+    scorer: RelevanceScorer,
+    objective: str,
+    page,
+    score: float,
+    executor: ThreadPoolExecutor,
+) -> str:
+    return await _run_in_executor(executor, scorer.explain, objective, page, score)
