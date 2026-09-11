@@ -28,6 +28,34 @@ class HTMLPageParserTests(unittest.TestCase):
         self.assertEqual(page.links[0].anchor_text, "Financial aid")
         self.assertEqual(page.links[0].depth, 1)
 
+    def test_prefers_main_content_and_extracts_metadata(self):
+        html = """
+        <html>
+          <head>
+            <title>Research page</title>
+            <meta name="description" content="A useful research summary.">
+            <link rel="canonical" href="/research/robots?utm_source=feed">
+          </head>
+          <body>
+            <header class="site-header"><a href="/irrelevant">Menu</a></header>
+            <main>
+              <h1>Warehouse robot research</h1>
+              <p>Autonomous systems improve warehouse picking accuracy.</p>
+              <a href="/methods">Methods</a>
+            </main>
+            <footer>Copyright and cookie settings</footer>
+          </body>
+        </html>
+        """
+
+        page = HTMLPageParser().parse(html, "https://example.edu/research", depth=0)
+
+        self.assertEqual(page.canonical_url, "https://example.edu/research/robots")
+        self.assertIn("warehouse robot research", page.text.lower())
+        self.assertIn("warehouse robot research", page.headings[0].lower())
+        self.assertNotIn("cookie settings", page.text.lower())
+        self.assertEqual([link.url for link in page.links], ["https://example.edu/methods"])
+
 
 if __name__ == "__main__":
     unittest.main()
