@@ -17,10 +17,14 @@ class AsyncPageFetcher:
         user_agent: str,
         timeout_seconds: float = 10.0,
         retry_limit: int = 2,
+        max_response_bytes: int = 2_000_000,
     ) -> None:
+        if max_response_bytes < 1:
+            raise ValueError("max_response_bytes must be at least 1")
         self.user_agent = user_agent
         self.timeout_seconds = timeout_seconds
         self.retry_limit = max(0, retry_limit)
+        self.max_response_bytes = max_response_bytes
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> "AsyncPageFetcher":
@@ -46,6 +50,9 @@ class AsyncPageFetcher:
                 response = await self._client.get(url)
                 content_type = response.headers.get("content-type", "")
                 if response.status_code >= 400:
+                    if response.status_code in {408, 425, 429, 500, 502, 503, 504} and attempt < self.retry_limit:
+                        await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
+                        continue
                     return FetchResult(
                         url=str(response.url),
                         status_code=response.status_code,
@@ -53,7 +60,17 @@ class AsyncPageFetcher:
                         text=None,
                         error=f"HTTP {response.status_code}",
                     )
-                if not is_html_content_type(content_type):
+                if len(response.content) > self.max_response_bytes:
+                    return FetchResult(
+                        url=str(response.url),
+                        status_code=response.status_code,
+                        content_type=content_type,
+                        text=None,
+                        error=f"Response exceeds {self.max_response_bytes} byte limit",
+                    )
+                if not is_html_content_type(content_type) and not (
+                    not content_type and _looks_like_html(response.content)
+                ):
                     return FetchResult(
                         url=str(response.url),
                         status_code=response.status_code,
@@ -74,6 +91,11 @@ class AsyncPageFetcher:
                     await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
 
         return FetchResult(url=url, status_code=None, content_type="", text=None, error=last_error)
+
+
+def _looks_like_html(content: bytes) -> bool:
+    sample = content.lstrip()[:512].lower()
+    return sample.startswith((b"<!doctype html", b"<html", b"<head", b"<body"))
 
 
 def fetch_page(url: str) -> str | None:
