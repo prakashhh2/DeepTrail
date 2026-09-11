@@ -17,6 +17,11 @@ class CrawlRequest:
     crawl_delay_seconds: float = 0.5
     respect_robots_txt: bool = True
     result_limit: int = 10
+    # Keep the returned corpus focused enough to pass to an LLM while still
+    # allowing the crawler to visit more pages and rank them first.
+    max_content_chars: int = 60_000
+    max_response_bytes: int = 2_000_000
+    output_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -26,6 +31,7 @@ class DiscoveredLink:
     source_url: str
     depth: int
     score: float = 0.0
+    context: str = ""
 
 
 @dataclass(slots=True)
@@ -38,6 +44,8 @@ class PageData:
     incoming_anchor_text: str = ""
     headings: list[str] = field(default_factory=list)
     description: str = ""
+    canonical_url: str = ""
+    word_count: int = 0
 
 
 @dataclass(slots=True)
@@ -60,6 +68,11 @@ class CrawlResult:
     score: float
     depth: int
     reason: str
+    text: str = ""
+    headings: list[str] = field(default_factory=list)
+    description: str = ""
+    canonical_url: str = ""
+    word_count: int = 0
 
 
 @dataclass(slots=True)
@@ -69,6 +82,7 @@ class CrawlStats:
     urls_discovered: int = 0
     duplicates_skipped: int = 0
     crawl_duration_ms: int = 0
+    pages_attempted: int = 0
 
 
 @dataclass(slots=True)
@@ -76,3 +90,5 @@ class CrawlResponse:
     results: list[CrawlResult]
     stats: CrawlStats
     errors: list[str] = field(default_factory=list)
+    objective: str = ""
+    seeds: list[str] = field(default_factory=list)
