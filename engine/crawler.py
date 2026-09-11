@@ -47,10 +47,11 @@ async def crawl(
     errors: list[str] = []
     results: list[CrawlResult] = []
     visited: set[str] = set()
+    canonical_seen: set[str] = set()
 
     policy = CrawlPolicy.from_request(request)
     frontier = CrawlFrontier()
-    page_parser = parser or HTMLPageParser()
+    page_parser = parser or HTMLPageParser(max_text_chars=request.max_content_chars)
     relevance_scorer = scorer or HybridRelevanceScorer()
     scoring_executor = ThreadPoolExecutor(max_workers=max(1, request.concurrency))
     rate_limiter = DomainRateLimiter(request.crawl_delay_seconds)
@@ -72,9 +73,9 @@ async def crawl(
 
     async def run_loop() -> None:
         nonlocal active_fetcher
-        while frontier and stats.pages_crawled < request.max_pages:
+        while frontier and stats.pages_attempted < request.max_pages:
             batch: list[FrontierItem] = []
-            remaining = request.max_pages - stats.pages_crawled
+            remaining = request.max_pages - stats.pages_attempted
             batch_size = min(max(1, request.concurrency), remaining)
 
             while frontier and len(batch) < batch_size:
@@ -89,6 +90,8 @@ async def crawl(
 
             if not batch:
                 continue
+
+            stats.pages_attempted += len(batch)
 
             processed_pages = await asyncio.gather(
                 *(
@@ -116,6 +119,11 @@ async def crawl(
                 if processed.result is None:
                     continue
 
+                canonical_key = normalize_url(processed.result.canonical_url) or processed.result.url
+                if canonical_key in canonical_seen:
+                    stats.duplicates_skipped += 1
+                    continue
+                canonical_seen.add(canonical_key)
                 stats.pages_crawled += 1
                 results.append(processed.result)
 
@@ -142,6 +150,7 @@ async def crawl(
                 user_agent=request.user_agent,
                 timeout_seconds=request.request_timeout_seconds,
                 retry_limit=request.retry_limit,
+                max_response_bytes=request.max_response_bytes,
             ) as default_fetcher:
                 active_fetcher = default_fetcher
                 await run_loop()
@@ -152,7 +161,18 @@ async def crawl(
 
     results.sort(key=lambda result: result.score, reverse=True)
     stats.crawl_duration_ms = int((time.monotonic() - started_at) * 1000)
-    return CrawlResponse(results=results[: request.result_limit], stats=stats, errors=errors)
+    response = CrawlResponse(
+        results=results[: request.result_limit],
+        stats=stats,
+        errors=errors,
+        objective=request.objective,
+        seeds=list(request.seeds),
+    )
+    if request.output_path:
+        from engine.exporter import write_crawl_json
+
+        write_crawl_json(response, request.output_path)
+    return response
 
 
 async def _process_item(
@@ -206,6 +226,11 @@ async def _process_item(
             score=page_score,
             depth=page.depth,
             reason=await _explain(scorer, request.objective, page, page_score, scoring_executor),
+            text=page.text,
+            headings=page.headings,
+            description=page.description,
+            canonical_url=page.canonical_url,
+            word_count=page.word_count,
         )
         return _ProcessedPage(result=result, links=page.links)
     except Exception as exc:
@@ -228,6 +253,12 @@ def _validate_request(request: CrawlRequest) -> None:
         raise ValueError("max_depth cannot be negative")
     if request.concurrency < 1:
         raise ValueError("concurrency must be at least 1")
+    if request.result_limit < 1:
+        raise ValueError("result_limit must be at least 1")
+    if request.max_content_chars < 1:
+        raise ValueError("max_content_chars must be at least 1")
+    if request.max_response_bytes < 1:
+        raise ValueError("max_response_bytes must be at least 1")
 
 
 async def _run_in_executor(executor: ThreadPoolExecutor, function, *args):
