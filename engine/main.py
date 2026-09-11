@@ -3,14 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from dataclasses import asdict
 
 from engine.crawler import crawl_sync
 from engine.models import CrawlRequest
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a DeepTrain crawl.")
+    parser = argparse.ArgumentParser(description="Run a DeepTrail crawl.")
     parser.add_argument("objective")
     parser.add_argument("seeds", nargs="+")
     parser.add_argument("--max-pages", type=int, default=10)
@@ -19,6 +18,14 @@ def main() -> None:
     parser.add_argument("--ignore-robots-txt", action="store_true")
     parser.add_argument("--concurrency", type=int, default=5)
     parser.add_argument("--crawl-delay-seconds", type=float, default=0.5)
+    parser.add_argument("--result-limit", type=int, default=10)
+    parser.add_argument("--max-content-chars", type=int, default=60_000)
+    parser.add_argument("--max-response-bytes", type=int, default=2_000_000)
+    parser.add_argument(
+        "--output",
+        default="crawl_results.json",
+        help="UTF-8 JSON corpus path for the ranked pages (default: crawl_results.json)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -33,9 +40,22 @@ def main() -> None:
             respect_robots_txt=not args.ignore_robots_txt,
             concurrency=args.concurrency,
             crawl_delay_seconds=args.crawl_delay_seconds,
+            result_limit=args.result_limit,
+            max_content_chars=args.max_content_chars,
+            max_response_bytes=args.max_response_bytes,
+            output_path=args.output,
         )
     )
-    print(json.dumps(asdict(response), indent=2))
+    print(json.dumps({
+        "output": args.output,
+        "pages_crawled": response.stats.pages_crawled,
+        "pages_stored": len(response.results),
+        "top_pages": [
+            {"rank": rank, "score": page.score, "title": page.title, "url": page.url}
+            for rank, page in enumerate(response.results, start=1)
+        ],
+        "errors": response.errors,
+    }, indent=2))
 
 
 if __name__ == "__main__":
