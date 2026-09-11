@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "msclkid", "mc_cid", "mc_eid"}
-TOKEN_RE = re.compile(r"[a-z0-9]+")
+TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def normalize_url(url: str, base_url: str | None = None) -> str | None:
@@ -64,7 +64,7 @@ def collapse_whitespace(text: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    return TOKEN_RE.findall(text.lower())
+    return TOKEN_RE.findall(text.casefold())
 
 
 def cosine_similarity(left: str, right: str) -> float:
