@@ -5,7 +5,7 @@ from threading import RLock
 from typing import Any, Protocol, Sequence
 
 from engine.models import DiscoveredLink, PageData
-from engine.utils import cosine_similarity, tokenize, url_path_text
+from engine.utils import tokenize, url_path_text
 
 
 class RelevanceScorer(Protocol):
@@ -27,31 +27,37 @@ class EmbeddingBackend(Protocol):
 
 
 class KeywordRelevanceScorer:
+    _STOPWORDS = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in",
+        "into", "is", "it", "of", "on", "or", "that", "the", "their", "this", "to", "using",
+        "what", "when", "where", "which", "who", "with", "find", "about", "pages", "page",
+    }
+
     def prepare(self, objective: str) -> None:
         """Keep the scorer lifecycle compatible with embedding-based scorers."""
 
     def score_page(self, objective: str, page: PageData) -> float:
-        title_similarity = cosine_similarity(objective, page.title)
-        anchor_similarity = cosine_similarity(objective, page.incoming_anchor_text)
-        url_similarity = cosine_similarity(objective, url_path_text(page.url))
-        content_similarity = cosine_similarity(objective, page.text[:20_000])
-
-        score = (
-            title_similarity * 0.30
-            + anchor_similarity * 0.25
-            + url_similarity * 0.15
-            + content_similarity * 0.30
+        fields = (
+            (page.title, 0.30),
+            (" ".join(getattr(page, "headings", [])), 0.24),
+            (page.description, 0.14),
+            (page.incoming_anchor_text, 0.10),
+            (url_path_text(page.url), 0.10),
+            (page.text[:20_000], 0.12),
         )
+        score = sum(self._match(objective, value) * weight for value, weight in fields)
         return min(1.0, round(score, 4))
 
     def score_link(self, objective: str, link: DiscoveredLink) -> float:
-        anchor_similarity = cosine_similarity(objective, link.anchor_text)
-        url_similarity = cosine_similarity(objective, url_path_text(link.url))
-        score = anchor_similarity * 0.65 + url_similarity * 0.35
+        score = (
+            self._match(objective, link.anchor_text) * 0.58
+            + self._match(objective, getattr(link, "context", "")) * 0.12
+            + self._match(objective, url_path_text(link.url)) * 0.30
+        )
         return min(1.0, round(score, 4))
 
     def explain(self, objective: str, page: PageData, score: float) -> str:
-        objective_terms = set(tokenize(objective))
+        objective_terms = set(self._terms(objective))
         page_terms = set(tokenize(f"{page.title} {page.incoming_anchor_text} {url_path_text(page.url)} {page.text[:5000]}"))
         shared_terms = sorted(objective_terms & page_terms)
 
@@ -61,6 +67,23 @@ class KeywordRelevanceScorer:
         if score > 0:
             return "Page has weak lexical similarity to the objective."
         return "Page had little direct lexical overlap with the objective."
+
+    @classmethod
+    def _terms(cls, text: str) -> list[str]:
+        return [term for term in tokenize(text) if term not in cls._STOPWORDS and len(term) > 1]
+
+    @classmethod
+    def _match(cls, objective: str, candidate: str) -> float:
+        query_terms = cls._terms(objective)
+        candidate_terms = set(cls._terms(candidate))
+        if not query_terms or not candidate_terms:
+            return 0.0
+
+        coverage = sum(term in candidate_terms for term in set(query_terms)) / len(set(query_terms))
+        normalized_query = " ".join(query_terms)
+        normalized_candidate = " ".join(cls._terms(candidate))
+        phrase_bonus = 1.0 if normalized_query and normalized_query in normalized_candidate else 0.0
+        return min(1.0, coverage * 0.82 + phrase_bonus * 0.18)
 
 
 class SemanticRelevanceScorer:
@@ -152,6 +175,7 @@ class SemanticRelevanceScorer:
     def link_text(link: DiscoveredLink) -> str:
         parts = [
             SemanticRelevanceScorer._section("Anchor", link.anchor_text),
+            SemanticRelevanceScorer._section("Context", getattr(link, "context", "")),
             SemanticRelevanceScorer._section("URL", SemanticRelevanceScorer._url_text(link.url)),
         ]
         return " ".join(part for part in parts if part).strip()
